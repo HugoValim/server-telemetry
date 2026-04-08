@@ -33,3 +33,5 @@ Thumbs.db
 # Credentials / secrets (if ever added)
 *.pem
 *.key
+!.claude/settings.json
+.claude/
