@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Telemetry</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0f0f1a;
+            --card: #1a1a2e;
+            --bar-bg: #2a2a3e;
+            --text: #e0e0e0;
+            --text-dim: #666;
+            --green: #22c55e;
+            --yellow: #eab308;
+            --red: #ef4444;
+            --blue: #3b82f6;
+        }
+        body.light {
+            --bg: #f5f5f5;
+            --card: #ffffff;
+            --bar-bg: #e0e0e0;
+            --text: #1a1a2e;
+            --text-dim: #888;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+            transition: background 0.3s, color 0.3s;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .header-left h1 { font-size: 1.8rem; font-weight: 600; }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+        .theme-btn, .stream-btn {
+            background: var(--card);
+            border: 1px solid var(--bar-bg);
+            color: var(--text);
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .theme-btn:hover, .stream-btn:hover { opacity: 0.8; }
+        .stream-btn.active { background: var(--blue); border-color: var(--blue); }
+        .poll-select {
+            background: var(--card);
+            border: 1px solid var(--bar-bg);
+            color: var(--text);
+            padding: 0.4rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+        }
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            position: relative;
+        }
+        .card.alert::before {
+            content: "⚠";
+            position: absolute;
+            top: 0.5rem;
+            right: 0.75rem;
+            font-size: 1.2rem;
+        }
+        .card-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+            margin-bottom: 0.75rem;
+        }
+        .metric { font-size: 2rem; font-weight: 700; }
+        .metric-label { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem; }
+        .bar-container {
+            background: var(--bar-bg);
+            border-radius: 6px;
+            height: 8px;
+            margin-top: 0.75rem;
+            overflow: hidden;
+        }
+        .bar {
+            height: 100%;
+            border-radius: 6px;
+            transition: width 0.5s ease, background-color 0.3s ease;
+        }
+        .bar.green { background: var(--green); }
+        .bar.yellow { background: var(--yellow); }
+        .bar.red { background: var(--red); }
+        .details {
+            margin-top: 0.75rem;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+        }
+        .details span { display: flex; justify-content: space-between; }
+        .full { grid-column: 1 / -1; }
+        .uptime-value { font-size: 1.4rem; font-weight: 600; color: var(--green); }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .chart-card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .processes-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+        }
+        .processes-table th {
+            text-align: left;
+            color: var(--text-dim);
+            font-weight: 500;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--bar-bg);
+        }
+        .processes-table td { padding: 0.4rem 0; }
+        .processes-table tr:hover { background: var(--bar-bg); border-radius: 4px; }
+        .footer {
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            margin-top: 1rem;
+        }
+        .footer .error { color: var(--red); }
+        .footer .ok { color: var(--green); }
+        .temp-badge {
+            display: inline-block;
+            background: var(--bar-bg);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            margin: 0.1rem;
+        }
+        .alert-banner {
+            background: var(--red);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+            display: none;
+        }
+        .alert-banner.show { display: block; }
+    </style>
+</head>
+<body>
+    <div class="alert-banner" id="alert-banner"></div>
+
+    <div class="header">
+        <div class="header-left">
+            <h1>Server Telemetry</h1>
+            <div style="font-size:0.8rem;color:var(--text-dim);">Last updated: <span id="last-updated">--</span></div>
+        </div>
+        <div class="header-right">
+            <div class="controls">
+                <button class="stream-btn" id="stream-btn" onclick="toggleStream()">WS Off</button>
+                <select class="poll-select" id="poll-rate" onchange="setPollRate(this.value)">
+                    <option value="1000">1s</option>
+                    <option value="5000" selected>5s</option>
+                    <option value="10000">10s</option>
+                    <option value="30000">30s</option>
+                </select>
+                <button class="theme-btn" onclick="toggleTheme()">🌙</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card" id="cpu-card">
+            <div class="card-title">CPU</div>
+            <div class="metric"><span id="cpu-percent">--</span>%</div>
+            <div class="metric-label" id="cpu-cores">-- cores · load: <span id="cpu-load">--</span></div>
+            <div class="bar-container"><div class="bar" id="cpu-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="card" id="mem-card">
+            <div class="card-title">Memory</div>
+            <div class="metric"><span id="mem-percent">--</span>%</div>
+            <div class="metric-label" id="mem-used">-- / -- GB</div>
+            <div class="bar-container"><div class="bar" id="mem-bar" style="width:0%"></div></div>
+            <div class="details">
+                <span><span>Swap</span><span id="mem-swap">--%</span></span>
+            </div>
+        </div>
+
+        <div class="card" id="disk-card">
+            <div class="card-title">Disk</div>
+            <div class="metric"><span id="disk-percent">--</span>%</div>
+            <div class="metric-label" id="disk-used">-- / -- GB</div>
+            <div class="bar-container"><div class="bar" id="disk-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Network</div>
+            <div class="metric" id="net-sent" style="font-size:1.4rem">--</div>
+            <div class="metric-label">Sent</div>
+            <div class="details">
+                <span><span>Received</span><span id="net-recv">--</span></span>
+                <span><span>Pkts sent</span><span id="net-psent">--</span></span>
+                <span><span>Pkts recv</span><span id="net-precv">--</span></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Uptime</div>
+            <div class="uptime-value" id="uptime">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Temperatures</div>
+            <div id="temps">--</div>
+        </div>
+
+        <div class="card full">
+            <div class="card-title">Top Processes</div>
+            <table class="processes-table">
+                <thead>
+                    <tr>
+                        <th>PID</th>
+                        <th>Name</th>
+                        <th>CPU %</th>
+                        <th>Memory %</th>
+                    </tr>
+                </thead>
+                <tbody id="processes-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="charts-grid">
+        <div class="chart-card">
+            <div class="card-title">CPU %</div>
+            <canvas id="cpu-chart" height="120"></canvas>
+        </div>
+        <div class="chart-card">
+            <div class="card-title">Memory %</div>
+            <canvas id="mem-chart" height="120"></canvas>
+        </div>
+        <div class="chart-card">
+            <div class="card-title">Disk %</div>
+            <canvas id="disk-chart" height="120"></canvas>
+        </div>
+    </div>
+
+    <div class="footer">
+        <span id="status">Connecting...</span>
+    </div>
+
+    <script>
+        const POLL_INTERVAL = parseInt(localStorage.getItem('pollRate') || '5000');
+        let polling = null;
+        let ws = null;
+        let usingWs = false;
+        let cpuChart, memChart, diskChart;
+        let chartData = { cpu: [], mem: [], disk: [], labels: [] };
+        const MAX_CHART = 60;
+        let apiKey = '';
+
+        document.getElementById('poll-rate').value = POLL_INTERVAL;
+        if (localStorage.getItem('theme') === 'light') document.body.classList.add('light');
+
+        function getHeaders() {
+            return apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {};
+        }
+
+        async function loadApiKey() {
+            try {
+                const resp = await fetch('/api/key');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    apiKey = data.api_key;
+                }
+            } catch {}
+        }
+
+        function getBarColor(pct, cardEl) {
+            const color = pct < 50 ? 'green' : pct < 80 ? 'yellow' : 'red';
+            if (cardEl) {
+                if (color === 'red') cardEl.classList.add('alert');
+                else cardEl.classList.remove('alert');
+            }
+            return color;
+        }
+
+        function formatBytes(b) {
+            if (!b && b !== 0) return '--';
+            const k = 1024, sizes = ['B','KB','MB','GB','TB'];
+            const i = Math.floor(Math.log(b) / Math.log(k));
+            return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function formatUptime(bt) {
+            const s = Math.floor(Date.now() / 1000) - bt;
+            const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+            const p = [];
+            if (d) p.push(d+'d'); if (h) p.push(h+'h'); if (m) p.push(m+'m');
+            return p.join(' ') || '< 1m';
+        }
+
+        function updateTimestamp() {
+            document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+        }
+
+        function updateCharts(ts) {
+            chartData.labels.push(ts);
+            if (chartData.labels.length > MAX_CHART) {
+                chartData.labels.shift();
+                chartData.cpu.shift();
+                chartData.mem.shift();
+                chartData.disk.shift();
+            }
+            [cpuChart, memChart, diskChart].forEach(c => c.update('none'));
+        }
+
+        function initCharts() {
+            const opt = {
+                responsive: true,
+                animation: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { display: false },
+                    y: { min: 0, max: 100, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#666', font: {size: 10} } }
+                },
+                elements: { point: { radius: 0 }, line: { tension: 0.3 } }
+            };
+            cpuChart = new Chart(document.getElementById('cpu-chart'), {
+                type: 'line', data: { labels: chartData.labels, datasets: [{ data: chartData.cpu, borderColor: '#3b82f6', borderWidth: 2, fill: true, backgroundColor: 'rgba(59,130,246,0.1)' }] }, options: opt
+            });
+            memChart = new Chart(document.getElementById('mem-chart'), {
+                type: 'line', data: { labels: chartData.labels, datasets: [{ data: chartData.mem, borderColor: '#22c55e', borderWidth: 2, fill: true, backgroundColor: 'rgba(34,197,94,0.1)' }] }, options: opt
+            });
+            diskChart = new Chart(document.getElementById('disk-chart'), {
+                type: 'line', data: { labels: chartData.labels, datasets: [{ data: chartData.disk, borderColor: '#eab308', borderWidth: 2, fill: true, backgroundColor: 'rgba(234,179,8,0.1)' }] }, options: opt
+            });
+        }
+
+        function applyData(data) {
+            // CPU
+            const cpuPct = data.cpu.percent;
+            document.getElementById('cpu-percent').textContent = cpuPct.toFixed(1);
+            document.getElementById('cpu-cores').textContent = data.cpu.count + ' cores · load: ' + (data.cpu.load_avg ? data.cpu.load_avg.map(x=>x.toFixed(2)).join(', ') : '--');
+            const cpuBar = document.getElementById('cpu-bar');
+            cpuBar.style.width = cpuPct + '%';
+            cpuBar.className = 'bar ' + getBarColor(cpuPct, document.getElementById('cpu-card'));
+            document.getElementById('cpu-card').classList.toggle('alert', cpuPct > 80);
+
+            // Memory
+            const memPct = data.memory.percent;
+            const memTotal = (data.memory.total / 1e9).toFixed(1);
+            const memUsed = (data.memory.used / 1e9).toFixed(1);
+            document.getElementById('mem-percent').textContent = memPct.toFixed(1);
+            document.getElementById('mem-used').textContent = memUsed + ' / ' + memTotal + ' GB';
+            const memBar = document.getElementById('mem-bar');
+            memBar.style.width = memPct + '%';
+            memBar.className = 'bar ' + getBarColor(memPct, document.getElementById('mem-card'));
+            document.getElementById('mem-card').classList.toggle('alert', memPct > 80);
+            document.getElementById('mem-swap').textContent = (data.memory.swap_percent || 0).toFixed(1) + '%';
+
+            // Disk
+            const diskPct = data.disk.percent;
+            document.getElementById('disk-percent').textContent = diskPct.toFixed(1);
+            document.getElementById('disk-used').textContent = (data.disk.used/1e9).toFixed(1) + ' / ' + (data.disk.total/1e9).toFixed(0) + ' GB';
+            const diskBar = document.getElementById('disk-bar');
+            diskBar.style.width = diskPct + '%';
+            diskBar.className = 'bar ' + getBarColor(diskPct, document.getElementById('disk-card'));
+            document.getElementById('disk-card').classList.toggle('alert', diskPct > 90);
+
+            // Network
+            document.getElementById('net-sent').textContent = formatBytes(data.network.bytes_sent);
+            document.getElementById('net-recv').textContent = formatBytes(data.network.bytes_recv);
+            document.getElementById('net-psent').textContent = data.network.packets_sent.toLocaleString();
+            document.getElementById('net-precv').textContent = data.network.packets_recv.toLocaleString();
+
+            // Uptime
+            document.getElementById('uptime').textContent = formatUptime(data.uptime);
+
+            // Temps
+            const tempsEl = document.getElementById('temps');
+            if (data.temperatures && data.temperatures.length) {
+                tempsEl.innerHTML = data.temperatures.map(t =>
+                    `<span class="temp-badge">${t.label}: ${t.value.toFixed(1)}°C</span>`
+                ).join('');
+            } else {
+                tempsEl.textContent = 'No sensors';
+            }
+
+            // Alerts
+            const alerts = [];
+            if (data.alerts) {
+                if (data.alerts.cpu) alerts.push('CPU high');
+                if (data.alerts.memory) alerts.push('Memory high');
+                if (data.alerts.disk) alerts.push('Disk high');
+            }
+            const banner = document.getElementById('alert-banner');
+            banner.textContent = alerts.length ? '⚠ Alert: ' + alerts.join(', ') : '';
+            banner.classList.toggle('show', alerts.length > 0);
+
+            // Charts
+            const ts = new Date().toLocaleTimeString();
+            chartData.cpu.push(parseFloat(cpuPct.toFixed(1)));
+            chartData.mem.push(parseFloat(memPct.toFixed(1)));
+            chartData.disk.push(parseFloat(diskPct.toFixed(1)));
+            if (!usingWs || !cpuChart || cpuChart.data.labels.length === 0) updateCharts(ts);
+
+            updateTimestamp();
+            document.getElementById('status').textContent = 'Live';
+            document.getElementById('status').className = 'ok';
+        }
+
+        async function fetchTelemetry() {
+            try {
+                const resp = await fetch('/api/telemetry', { headers: getHeaders() });
+                if (resp.status === 401) {
+                    document.getElementById('status').textContent = 'Unauthorized — reload to re-fetch key';
+                    document.getElementById('status').className = 'error';
+                    return;
+                }
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                applyData(await resp.json());
+            } catch (e) {
+                document.getElementById('status').textContent = 'Error: ' + e.message;
+                document.getElementById('status').className = 'error';
+            }
+        }
+
+        async function loadProcesses() {
+            try {
+                const resp = await fetch('/api/processes?sort_by=cpu&limit=5', { headers: getHeaders() });
+                if (!resp.ok) return;
+                const { processes } = await resp.json();
+                const body = document.getElementById('processes-body');
+                body.innerHTML = processes.map(p =>
+                    `<tr><td>${p.pid}</td><td>${p.name}</td><td>${(p.value || 0).toFixed(1)}</td><td>--</td></tr>`
+                ).join('');
+            } catch {}
+        }
+
+        function startPolling() {
+            stopAll();
+            polling = setInterval(fetchTelemetry, POLL_INTERVAL);
+            fetchTelemetry();
+            loadProcesses();
+        }
+
+        function stopAll() {
+            if (polling) { clearInterval(polling); polling = null; }
+            if (ws) { ws.close(); ws = null; }
+        }
+
+        function toggleStream() {
+            if (usingWs) {
+                startPolling();
+                usingWs = false;
+                document.getElementById('stream-btn').textContent = 'WS Off';
+                document.getElementById('stream-btn').classList.remove('active');
+            } else {
+                stopAll();
+                usingWs = true;
+                document.getElementById('stream-btn').textContent = 'WS On';
+                document.getElementById('stream-btn').classList.add('active');
+                document.getElementById('status').textContent = 'Connecting...';
+                ws = new WebSocket('ws://' + location.host + '/ws/telemetry?token=' + encodeURIComponent(apiKey));
+                ws.onmessage = e => { applyData(JSON.parse(e.data)); };
+                ws.onerror = () => { document.getElementById('status').textContent = 'WS Error'; document.getElementById('status').className = 'error'; };
+                ws.onclose = () => {
+                    if (usingWs) {
+                        document.getElementById('status').textContent = 'WS closed';
+                        document.getElementById('status').className = 'error';
+                    }
+                };
+            }
+        }
+
+        function setPollRate(val) {
+            localStorage.setItem('pollRate', val);
+            if (!usingWs) startPolling();
+        }
+
+        function toggleTheme() {
+            document.body.classList.toggle('light');
+            localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark');
+            document.querySelector('.theme-btn').textContent = document.body.classList.contains('light') ? '🌙' : '☀';
+        }
+
+        async function init() {
+            await loadApiKey();
+            initCharts();
+            startPolling();
+        }
+
+        init();
+    </script>
+</body>
+</html>
