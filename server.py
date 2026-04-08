@@ -1,25 +1,127 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, WebSocketDeniedMessage
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime
 from collections import deque
+from itsdangerous import URLSafeTimedSerializer
 import psutil
 import asyncio
-import time
-import secrets
+import os
 
 app = FastAPI(title="Server Telemetry")
 
 # ── Security ──────────────────────────────────────────────────────────────────
 
-API_KEY = secrets.token_hex(16)
+# Session signing key — change this to a random value in production
+SECRET_KEY = os.environ.get("SECRET_KEY", os.environ.get("API_KEY", "dev-secret-change-me"))
+session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+API_KEY = os.environ.get("API_KEY")
+if not API_KEY:
+    import secrets
+    API_KEY = secrets.token_hex(16)
+    print("WARNING: API_KEY not set via environment variable. Using ephemeral key:", API_KEY[:8] + "...")
+
+API_KEY_READONLY = os.environ.get("API_KEY_READONLY")
+if not API_KEY_READONLY:
+    import secrets
+    API_KEY_READONLY = secrets.token_hex(16)
+    print("WARNING: API_KEY_READONLY not set via environment variable. Using ephemeral read-only key:", API_KEY_READONLY[:8] + "...")
+
+# ── OAuth2 / SSO Configuration ───────────────────────────────────────────────
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+# Comma-separated list of allowed email addresses or domains (e.g. "alice@corp.com,bob@corp.com" or "corp.com")
+ALLOWED_EMAILS = os.environ.get("ALLOWED_EMAILS", "")
+
+oauth_configured = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+
+def get_allowed_domains():
+    """Parse ALLOWED_EMAILS into set of emails and domains."""
+    if not ALLOWED_EMAILS:
+        return set()
+    entries = {e.strip().lower() for e in ALLOWED_EMAILS.split(",") if e.strip()}
+    # Separate full emails from domain wildcards
+    return entries
+
+
+def email_allowed(email: str) -> bool:
+    """Check if email is in the allowed list or domain."""
+    allowed = get_allowed_domains()
+    if not allowed:
+        return True  # No restriction configured
+    email_lower = email.lower()
+    for entry in allowed:
+        if "@" in entry:
+            if email_lower == entry:
+                return True
+        else:
+            # Domain wildcard
+            if email_lower.endswith("@" + entry):
+                return True
+    return False
+
+PROXY_COUNT = int(os.environ.get("PROXY_COUNT", "0"))
+
+# ── Session Management ────────────────────────────────────────────────────────
+
+SESSION_COOKIE = "session"
+SESSION_MAX_AGE = 8 * 60 * 60  # 8 hours in seconds
+
+
+def create_session(response: Response, data: dict):
+    """Sign and set a session cookie."""
+    session_data = session_serializer.dumps(data)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_data,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=False,  # Set True in production with HTTPS
+        samesite="lax",
+    )
+
+
+def get_session(request: Request) -> dict | None:
+    """Validate and decode a session cookie. Returns None if invalid."""
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if not cookie:
+        return None
+    try:
+        return session_serializer.loads(cookie, max_age=SESSION_MAX_AGE)
+    except Exception:
+        return None
+
+
+def clear_session(response: Response):
+    """Delete the session cookie."""
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value="",
+        max_age=0,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+    )
+
+
+def get_client_ip(request: Request) -> str:
+    """Get real client IP, accounting for trusted reverse proxies."""
+    if PROXY_COUNT > 0:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            # Take the leftmost (original client) IP
+            return forwarded.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=get_client_ip, default_limits=["60/minute"])
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -27,6 +129,15 @@ SECURITY_HEADERS = {
     "X-XSS-Protection": "1; mode=block",
     "Referrer-Policy": "strict-origin-when-cross-origin",
 }
+
+# CORS configuration - allow dashboard to be served from any origin in dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.middleware("http")
@@ -47,8 +158,24 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 def verify_auth(request: Request) -> bool:
+    """Accept any valid key (read-only or full) or a valid session cookie."""
+    # API key auth (for scripts/curl)
     auth = request.headers.get("authorization", "")
-    return auth == f"Bearer {API_KEY}"
+    if auth:
+        key = auth.removeprefix("Bearer ").strip()
+        if key == API_KEY or key == API_KEY_READONLY:
+            return True
+    # Session cookie auth (for OAuth login)
+    if get_session(request):
+        return True
+    return False
+
+
+def verify_full_auth(request: Request) -> bool:
+    """Accept only the full API_KEY (not the read-only key or session)."""
+    auth = request.headers.get("authorization", "")
+    key = auth.removeprefix("Bearer ").strip()
+    return key == API_KEY
 
 
 async def auth_check(request: Request, path: str):
@@ -62,11 +189,35 @@ async def auth_check(request: Request, path: str):
 
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
-    # Auth via query param ?token=<key> since headers aren't accessible on ws handshake
-    token = websocket.query_params.get("token", "")
-    if token != API_KEY:
+    # Auth via session cookie (browser sends cookies during WS handshake)
+    # OR via Sec-WebSocket-Protocol header (API key)
+    session_cookie = websocket.cookies.get(SESSION_COOKIE)
+    authenticated = False
+
+    if session_cookie:
+        try:
+            session_serializer.loads(session_cookie, max_age=SESSION_MAX_AGE)
+            authenticated = True
+        except Exception:
+            pass
+
+    if not authenticated:
+        # Fallback: subprotocol (API key) — also try session via subprotocol
+        protocol = websocket.subprotocol
+        if protocol and (protocol == API_KEY or protocol == API_KEY_READONLY):
+            authenticated = True
+        elif protocol:
+            # Might be a session token in subprotocol
+            try:
+                session_serializer.loads(protocol, max_age=SESSION_MAX_AGE)
+                authenticated = True
+            except Exception:
+                pass
+
+    if not authenticated:
         await websocket.close(code=1008)
         return
+
     await websocket.accept()
     try:
         while True:
@@ -152,24 +303,6 @@ def get_telemetry_data() -> dict:
     }
 
 
-# ── REST Endpoints ────────────────────────────────────────────────────────────
-
-class AnalyzeIn(BaseModel):
-    text: str
-
-
-def compute(text: str) -> dict:
-    words = [w for w in text.strip().split() if w]
-    letters = sum(1 for ch in text if ch.isalpha())
-    chars = len(text)
-    return {
-        "chars": chars,
-        "letters": letters,
-        "words": len(words),
-        "unique_words": len({w.lower().strip(".,!?;:\"'") for w in words if w}),
-    }
-
-
 # Public endpoints (no auth required)
 @app.get("/health")
 def health():
@@ -186,18 +319,107 @@ def live():
     return {"ok": True}
 
 
-# Auth-gated endpoints
-@app.get("/api/key")
-def get_api_key():
-    """Returns the current API key on first request only (it's per-process)."""
-    return {"api_key": API_KEY}
+# ── OAuth2 / SSO Endpoints ────────────────────────────────────────────────────
+
+@app.get("/auth/login")
+def auth_login(request: Request):
+    """Redirect to Google OAuth consent screen."""
+    if not oauth_configured:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "OAuth2 not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables."},
+        )
+    import urllib.parse
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": str(request.base_url).rstrip("/") + "/auth/callback",
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    return RedirectResponse(
+        url="https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params),
+        status_code=302,
+    )
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, code: str | None = None, error: str | None = None):
+    """Handle OAuth2 callback from Google."""
+    if error:
+        return JSONResponse(status_code=400, content={"detail": f"OAuth error: {error}"})
+
+    if not code:
+        return JSONResponse(status_code=400, content={"detail": "Missing authorization code"})
+
+    # Exchange code for tokens
+    import httpx
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": str(request.base_url).rstrip("/") + "/auth/callback",
+                "grant_type": "authorization_code",
+            },
+        )
+
+    if token_resp.status_code != 200:
+        return JSONResponse(status_code=400, content={"detail": "Failed to exchange code for token"})
+
+    token_data = token_resp.json()
+    id_token = token_data.get("id_token") or token_data.get("access_token")
+
+    # Get user info
+    userinfo_resp = await client.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {id_token}"},
+    )
+
+    if userinfo_resp.status_code != 200:
+        return JSONResponse(status_code=400, content={"detail": "Failed to get user info"})
+
+    user_info = userinfo_resp.json()
+    email = user_info.get("email", "")
+
+    if not email_allowed(email):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"Access denied. Email '{email}' is not in the allowed list."},
+        )
+
+    # Create session
+    session_data = {"email": email, "name": user_info.get("name", "")}
+    response = RedirectResponse(url="/", status_code=302)
+    create_session(response, session_data)
+    return response
+
+
+@app.get("/auth/logout")
+def auth_logout():
+    """Clear session and redirect to home."""
+    response = RedirectResponse(url="/", status_code=302)
+    clear_session(response)
+    return response
+
+
+@app.get("/auth/me")
+def auth_me(request: Request):
+    """Return current user info from session."""
+    session = get_session(request)
+    if not session:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return session
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     # Skip auth for public endpoints
-    public = {"/", "/health", "/ready", "/live", "/dashboard"}
+    public = {"/", "/health", "/ready", "/live", "/dashboard", "/auth/"}
     if any(path.startswith(p) for p in public):
         return await call_next(request)
     if path.startswith("/api/") or path.startswith("/ws/"):
@@ -272,6 +494,7 @@ def get_uptime(request: Request):
 def get_history(request: Request, metric: str = "cpu", limit: int = 100):
     if metric not in history:
         raise HTTPException(400, f"Unknown metric: {metric}")
+    limit = max(1, min(limit, MAX_HISTORY))
     data = list(history[metric])
     return {"metric": metric, "data": data[-limit:]}
 
@@ -305,6 +528,9 @@ def get_thresholds(request: Request):
 @app.post("/api/thresholds")
 @limiter.limit("30/minute")
 def set_thresholds(request: Request, cpu: float = 80.0, memory: float = 80.0, disk: float = 90.0):
+    # Require full API_KEY, not read-only key
+    if not verify_full_auth(request):
+        raise HTTPException(status_code=403, detail="Read-only key cannot modify thresholds")
     thresholds["cpu"] = max(0, min(100, cpu))
     thresholds["memory"] = max(0, min(100, memory))
     thresholds["disk"] = max(0, min(100, disk))

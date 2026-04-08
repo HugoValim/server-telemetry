@@ -2,10 +2,14 @@ import sys
 import subprocess
 import time
 import socket
+import os
 from pathlib import Path
 
 import http.client
 import json
+
+
+TEST_API_KEY = "test-secret-key-for-tests"
 
 
 def wait_port(host: str, port: int, timeout_s: float = 10.0):
@@ -19,43 +23,15 @@ def wait_port(host: str, port: int, timeout_s: float = 10.0):
     raise RuntimeError("server did not start")
 
 
-def test_analyze_endpoint():
-    port = 8010
-    server = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "server:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        cwd=str(Path(__file__).parent),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        wait_port("127.0.0.1", port)
+def make_server_env():
+    """Return environment dict with TEST_API_KEY set."""
+    env = os.environ.copy()
+    env["API_KEY"] = TEST_API_KEY
+    return env
 
-        conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request(
-            "POST",
-            "/analyze",
-            body=json.dumps({"text": "Hello hello world!"}),
-            headers={"Content-Type": "application/json"},
-        )
-        resp = conn.getresponse()
-        data = json.loads(resp.read().decode("utf-8"))
 
-        assert resp.status == 200
-        assert data["words"] == 3
-        assert data["letters"] >= 10
-        assert data["unique_words"] == 2
-    finally:
-        server.terminate()
-        server.wait(timeout=5)
+def auth_headers():
+    return {"Authorization": f"Bearer {TEST_API_KEY}"}
 
 
 def test_telemetry_endpoint():
@@ -74,12 +50,13 @@ def test_telemetry_endpoint():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
 
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/api/telemetry")
+        conn.request("GET", "/api/telemetry", headers=auth_headers())
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
 
@@ -118,12 +95,13 @@ def test_processes_endpoint():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
 
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/api/processes?sort_by=cpu&limit=3")
+        conn.request("GET", "/api/processes?sort_by=cpu&limit=3", headers=auth_headers())
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
 
@@ -152,12 +130,13 @@ def test_history_endpoint():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
 
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/api/telemetry/history?metric=cpu&limit=10")
+        conn.request("GET", "/api/telemetry/history?metric=cpu&limit=10", headers=auth_headers())
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
 
@@ -185,12 +164,13 @@ def test_thresholds_endpoint():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
 
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/api/thresholds")
+        conn.request("GET", "/api/thresholds", headers=auth_headers())
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
 
@@ -219,6 +199,7 @@ def test_k8s_probes():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
@@ -233,6 +214,9 @@ def test_k8s_probes():
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+
+def test_dashboard():
     port = 8010
     server = subprocess.Popen(
         [
@@ -248,6 +232,7 @@ def test_k8s_probes():
         cwd=str(Path(__file__).parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=make_server_env(),
     )
     try:
         wait_port("127.0.0.1", port)
