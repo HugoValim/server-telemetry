@@ -287,6 +287,7 @@
     </div>
 
     <script>
+        // OAuth2 session-based auth — no API key needed for dashboard
         const POLL_INTERVAL = parseInt(localStorage.getItem('pollRate') || '5000');
         let polling = null;
         let ws = null;
@@ -294,23 +295,14 @@
         let cpuChart, memChart, diskChart;
         let chartData = { cpu: [], mem: [], disk: [], labels: [] };
         const MAX_CHART = 60;
-        let apiKey = '';
+        let currentUser = null;
 
         document.getElementById('poll-rate').value = POLL_INTERVAL;
         if (localStorage.getItem('theme') === 'light') document.body.classList.add('light');
 
         function getHeaders() {
-            return apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {};
-        }
-
-        async function loadApiKey() {
-            try {
-                const resp = await fetch('/api/key');
-                if (resp.ok) {
-                    const data = await resp.json();
-                    apiKey = data.api_key;
-                }
-            } catch {}
+            // Session cookie is sent automatically by the browser
+            return {};
         }
 
         function getBarColor(pct, cardEl) {
@@ -451,8 +443,7 @@
             try {
                 const resp = await fetch('/api/telemetry', { headers: getHeaders() });
                 if (resp.status === 401) {
-                    document.getElementById('status').textContent = 'Unauthorized — reload to re-fetch key';
-                    document.getElementById('status').className = 'error';
+                    showLoginPrompt();
                     return;
                 }
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -494,12 +485,13 @@
                 document.getElementById('stream-btn').textContent = 'WS Off';
                 document.getElementById('stream-btn').classList.remove('active');
             } else {
+                // Note: WebSocket uses session cookie — may need API key fallback for WS
                 stopAll();
                 usingWs = true;
                 document.getElementById('stream-btn').textContent = 'WS On';
                 document.getElementById('stream-btn').classList.add('active');
                 document.getElementById('status').textContent = 'Connecting...';
-                ws = new WebSocket('ws://' + location.host + '/ws/telemetry?token=' + encodeURIComponent(apiKey));
+                ws = new WebSocket('ws://' + location.host + '/ws/telemetry');
                 ws.onmessage = e => { applyData(JSON.parse(e.data)); };
                 ws.onerror = () => { document.getElementById('status').textContent = 'WS Error'; document.getElementById('status').className = 'error'; };
                 ws.onclose = () => {
@@ -522,8 +514,26 @@
             document.querySelector('.theme-btn').textContent = document.body.classList.contains('light') ? '🌙' : '☀';
         }
 
+        function showLoginPrompt() {
+            const banner = document.getElementById('alert-banner');
+            banner.innerHTML = '⚠ Please <a href="/auth/login" style="color:inherit;text-decoration:underline;">sign in with Google</a> to view telemetry.';
+            banner.classList.add('show');
+            document.getElementById('status').textContent = 'Not authenticated';
+            document.getElementById('status').className = 'error';
+        }
+
         async function init() {
-            await loadApiKey();
+            // Check if user is logged in via OAuth session
+            try {
+                const resp = await fetch('/auth/me');
+                if (resp.ok) {
+                    currentUser = await resp.json();
+                } else {
+                    showLoginPrompt();
+                }
+            } catch {
+                showLoginPrompt();
+            }
             initCharts();
             startPolling();
         }
